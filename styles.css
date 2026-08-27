@@ -1,0 +1,48 @@
+:root {
+  --primary: #1976d2;
+  --bg: #f4f6f8;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: var(--bg);
+  color: #333;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  background: var(--primary);
+  color: #fff;
+  padding: 16px;
+  text-align: center;
+}
+
+header h1 { font-size: 1.5rem; }
+.subtitle { opacity: 0.9; font-size: 0.9rem; }
+
+#install-btn {
+  margin-top: 12px;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--primary);
+  font-weight: bold;
+  cursor: pointer;
+}
+
+main {
+  flex: 1;
+  padding: 24px;
+  text-align: center;
+}
+
+.status-online {
+  margin-top: 16px;
+  color: #2e7d32;
+  font-weight: 600;
+}
