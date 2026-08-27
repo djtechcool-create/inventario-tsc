@@ -1,9 +1,18 @@
-const CACHE = 'inventario-tsc-v1';
+const CACHE = 'inventario-tsc-v2';
 const ASSETS = [
   './',
   './index.html',
-  './styles.css',
-  './app.js',
+  './css/styles.css',
+  './js/ui.js',
+  './js/db.js',
+  './js/excel.js',
+  './js/compare.js',
+  './js/calc.js',
+  './js/views/bodega.js',
+  './js/views/admin.js',
+  './js/views/report.js',
+  './js/app.js',
+  './vendor/xlsx.full.min.js',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png'

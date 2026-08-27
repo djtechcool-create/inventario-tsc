@@ -3,28 +3,52 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#1976d2">
-  <meta name="description" content="App híbrida de inventario TSC - PWA para móvil y PC">
+  <meta name="theme-color" content="#0d47a1">
+  <meta name="description" content="Sistema web de control y comparación de inventarios - Inventario TSC">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Inventario TSC</title>
   <link rel="manifest" href="manifest.json">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="icon" href="icons/icon-192.png">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
-  <header>
-    <h1>Inventario TSC</h1>
-    <p class="subtitle">App híbrida PWA</p>
-    <button id="install-btn" hidden>Instalar App</button>
-  </header>
 
-  <main>
-    <p>¡Listo! Tu app híbrida PWA está funcionando desde GitHub Pages.</p>
-    <p class="status-online">Conectado al host</p>
-  </main>
+  <!-- LOGIN -->
+  <div id="login-screen">
+    <div class="login-card">
+      <h1>Inventario TSC</h1>
+      <p class="sub">Control y comparación de inventarios de bodega</p>
+      <form id="login-form">
+        <div class="field">
+          <label for="login-user">Usuario</label>
+          <input id="login-user" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label for="login-pass">Contraseña</label>
+          <input id="login-pass" type="password" autocomplete="current-password" required>
+        </div>
+        <button class="btn btn-primary btn-block" type="submit">Ingresar</button>
+      </form>
+      <p class="hint" style="margin-top:12px;text-align:center" id="login-error"></p>
+      <p class="hint" style="margin-top:8px;text-align:center">Admin por defecto: <b>admin</b> / <b>admin123</b></p>
+    </div>
+  </div>
 
-  <script src="app.js"></script>
+  <!-- APP -->
+  <div id="app" hidden></div>
+  <div id="login-screen-modal" hidden></div>
+
+  <script src="vendor/xlsx.full.min.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/db.js"></script>
+  <script src="js/excel.js"></script>
+  <script src="js/compare.js"></script>
+  <script src="js/calc.js"></script>
+  <script src="js/views/bodega.js"></script>
+  <script src="js/views/admin.js"></script>
+  <script src="js/views/report.js"></script>
+  <script src="js/app.js"></script>
 </body>
 </html>
