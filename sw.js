@@ -1,46 +1,58 @@
-const CACHE = 'inventario-tsc-v2';
-const ASSETS = [
+const CACHE_NAME = 'inventario-tsc-v2';
+const STATIC_ASSETS = [
   './',
   './index.html',
   './css/styles.css',
-  './js/ui.js',
+  './js/firebase-config.js',
   './js/db.js',
+  './js/auth.js',
+  './js/ui.js',
   './js/excel.js',
-  './js/compare.js',
   './js/calc.js',
-  './js/views/bodega.js',
   './js/views/admin.js',
+  './js/views/bodega.js',
   './js/views/report.js',
   './js/app.js',
   './vendor/xlsx.full.min.js',
-  './manifest.json',
-  './icons/icon-192.png',
-  './icons/icon-512.png'
+  './manifest.json'
 ];
 
-self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
+self.addEventListener('install', event => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then(cache => cache.addAll(STATIC_ASSETS))
+  );
   self.skipWaiting();
 });
 
-self.addEventListener('activate', (e) => {
-  e.waitUntil(
+self.addEventListener('activate', event => {
+  event.waitUntil(
     caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
+      Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
     )
   );
   self.clients.claim();
 });
 
-self.addEventListener('fetch', (e) => {
-  if (e.request.method !== 'GET') return;
-  e.respondWith(
-    caches.match(e.request).then(cached =>
-      cached || fetch(e.request).then(res => {
-        const clone = res.clone();
-        caches.open(CACHE).then(c => c.put(e.request, clone));
-        return res;
-      }).catch(() => caches.match('./index.html'))
-    )
+self.addEventListener('fetch', event => {
+  if (event.request.url.includes('firebaseio.com') ||
+      event.request.url.includes('googleapis.com') ||
+      event.request.url.includes('gstatic.com')) {
+    event.respondWith(
+      caches.match(event.request).then(cached => {
+        const fetched = fetch(event.request).then(response => {
+          if (response.ok) {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+          }
+          return response;
+        }).catch(() => cached);
+        return cached || fetched;
+      })
+    );
+    return;
+  }
+
+  event.respondWith(
+    caches.match(event.request).then(cached => cached || fetch(event.request))
   );
 });

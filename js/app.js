@@ -1,76 +1,120 @@
-/* ============================================================
-   APP - Router e inicialización
-   - Login.
-   - Ruta por rol (admin → panel, bodega → vista móvil).
-   - Cambio de contraseña temporal.
-   ============================================================ */
-document.addEventListener('DOMContentLoaded', async () => {
-  const loginScreen = document.getElementById('login-screen');
-  const app = document.getElementById('app');
-  const form = document.getElementById('login-form');
-  const errEl = document.getElementById('login-error');
+const App = {
+  init() {
+    this.bindEvents();
+    Auth.onAuthStateChanged((user) => {
+      if (user) {
+        this.handleAuth(user);
+      } else {
+        this.showScreen('login');
+      }
+    });
+  },
 
-  await DB.init();
+  bindEvents() {
+    document.getElementById('login-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      this.login();
+    });
+    document.getElementById('admin-logout').addEventListener('click', () => this.logout());
+    document.getElementById('bodega-logout').addEventListener('click', () => this.logout());
+  },
 
-  // si hay sesión activa, ir directo
-  const s = DB.session();
-  if (s) {
-    // validar que el usuario siga existiendo
-    const u = DB.listUsers().find(x => x.id === s.id);
-    if (u) { startApp(u); return; }
-    DB.logout();
-  }
+  async login() {
+    const email = document.getElementById('email').value;
+    const password = document.getElementById('password').value;
+    const loginBtn = document.getElementById('login-btn');
+    const errorEl = document.getElementById('login-error');
 
-  loginScreen.hidden = false;
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    errEl.textContent = '';
-    const user = await DB.authenticate(
-      document.getElementById('login-user').value,
-      document.getElementById('login-pass').value
-    );
-    if (!user) { errEl.textContent = 'Usuario o contraseña incorrectos.'; return; }
-    DB.setSession(user);
-    loginScreen.hidden = true;
-    startApp(user);
-  });
+    UI.setLoading('login-btn', true);
+    errorEl.style.display = 'none';
 
-  function startApp(user) {
-    // Si tiene contraseña temporal y es admin o bodega, pedir cambio
-    if (user.temp) {
-      promptNewPassword(user);
+    try {
+      const { user, role } = await Auth.login(email, password);
+      if (!role) {
+        await Auth.logout();
+        errorEl.textContent = 'Su cuenta no tiene un rol asignado. Contacte al administrador.';
+        errorEl.style.display = 'block';
+        return;
+      }
+      await this.handleAuth(user);
+    } catch (err) {
+      errorEl.textContent = this.getFirebaseError(err.code);
+      errorEl.style.display = 'block';
+    } finally {
+      UI.setLoading('login-btn', false);
+    }
+  },
+
+  async handleAuth(user) {
+    const role = await Auth.refreshRole();
+    if (!role) {
+      UI.toast('Su cuenta no tiene un rol asignado.', 'error');
+      await Auth.logout();
       return;
     }
-    app.hidden = false;
-    if (user.role === 'admin') {
-      AdminView.init(user);
-    } else {
-      BodegaView.init(user);
-    }
-  }
 
-  function promptNewPassword(user) {
-    app.hidden = false;
-    app.innerHTML = `
-      <div class="login-card" style="max-width:400px;margin:60px auto">
-        <h1>Cambiar contraseña</h1>
-        <p class="sub">${UI.esc(user.name)}, define tu nueva contraseña.</p>
-        <div class="field"><label>Nueva contraseña</label><input id="np1" type="password" minlength="4" required></div>
-        <div class="field"><label>Confirmar</label><input id="np2" type="password" minlength="4" required></div>
-        <button class="btn btn-primary btn-block" id="np-btn">Guardar y continuar</button>
-        <p id="np-err" class="hint" style="color:var(--danger);margin-top:10px"></p>
-      </div>`;
-    document.getElementById('np-btn').addEventListener('click', async () => {
-      const p1 = document.getElementById('np1').value;
-      const p2 = document.getElementById('np2').value;
-      const errEl2 = document.getElementById('np-err');
-      if (p1.length < 4) { errEl2.textContent = 'Mínimo 4 caracteres.'; return; }
-      if (p1 !== p2) { errEl2.textContent = 'Las contraseñas no coinciden.'; return; }
-      await DB.setPassword(user.id, p1);
-      user.temp = false;
-      DB.setSession(user);
-      UI.toast('Contraseña actualizada');
-      if (user.role === 'admin') AdminView.init(user); else BodegaView.init(user);
-    });
+    const profile = await Auth.getUserProfile();
+    const displayName = profile?.displayName || user.email || user.uid.substring(0, 8);
+
+    if (role === 'ADMIN') {
+      document.getElementById('admin-user-name').textContent = displayName;
+      this.showScreen('admin');
+      AdminView.init();
+    } else {
+      document.getElementById('bodega-user-name').textContent = displayName;
+      this.showScreen('bodega');
+      BodegaView.init();
+    }
+  },
+
+  showScreen(screen) {
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('admin-screen').style.display = 'none';
+    document.getElementById('bodega-screen').style.display = 'none';
+
+    switch (screen) {
+      case 'login':
+        document.getElementById('login-screen').style.display = 'flex';
+        break;
+      case 'admin':
+        document.getElementById('admin-screen').style.display = 'flex';
+        break;
+      case 'bodega':
+        document.getElementById('bodega-screen').style.display = 'flex';
+        break;
+    }
+  },
+
+  async logout() {
+    await Auth.logout();
+    this.showScreen('login');
+    document.getElementById('email').value = '';
+    document.getElementById('password').value = '';
+    document.getElementById('login-error').style.display = 'none';
+  },
+
+  getFirebaseError(code) {
+    const errors = {
+      'auth/user-not-found': 'Usuario no encontrado.',
+      'auth/wrong-password': 'Contraseña incorrecta.',
+      'auth/invalid-email': 'Correo electrónico inválido.',
+      'auth/user-disabled': 'Esta cuenta ha sido deshabilitada.',
+      'auth/too-many-requests': 'Demasiados intentos. Intente más tarde.',
+      'auth/network-request-failed': 'Error de red. Verifique su conexión.',
+      'auth/invalid-credential': 'Credenciales inválidas.',
+    };
+    return errors[code] || 'Error al iniciar sesión. Intente de nuevo.';
   }
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+  App.init();
 });
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js')
+      .then(reg => console.log('SW registered'))
+      .catch(err => console.log('SW registration failed'));
+  });
+}

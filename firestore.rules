@@ -1,0 +1,92 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAdmin() {
+      return request.auth != null && request.auth.token.role == 'ADMIN';
+    }
+
+    function isBodega() {
+      return request.auth != null && request.auth.token.role == 'BODEGA';
+    }
+
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    match /users/{userId} {
+      allow read: if isAuth() && (isAdmin() || isOwner(userId));
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /inventoryCycles/{cycleId} {
+      allow read: if isAuth();
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if false;
+
+      match /physicalCounts/{countId} {
+        allow read: if isAuth() && (isAdmin() || (isBodega() && resource.data.userId == request.auth.uid));
+        allow create: if isAuth() && request.resource.data.userId == request.auth.uid;
+        allow update: if isAuth() && (
+          isAdmin() ||
+          (isBodega() && resource.data.userId == request.auth.uid && resource.data.status == 'BORRADOR')
+        );
+        allow delete: if false;
+      }
+
+      match /recountRequests/{requestId} {
+        allow read: if isAuth() && (isAdmin() || (isBodega() && resource.data.assignedTo == request.auth.uid));
+        allow create: if isAdmin();
+        allow update: if isAdmin() || (isBodega() && resource.data.assignedTo == request.auth.uid);
+        allow delete: if false;
+      }
+    }
+
+    match /virtualImports/{importId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /virtualItems/{itemId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /comparisons/{comparisonId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /reconciliations/{reconciliationId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /auditLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAuth();
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /catalogs/{catalogId} {
+      allow read: if isAuth();
+      allow write: if isAdmin();
+    }
+  }
+}

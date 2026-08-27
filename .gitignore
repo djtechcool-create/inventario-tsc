@@ -1,5 +1,5 @@
 node_modules/
-dist/
+.firebase/
 *.log
-.DS_Store
-Thumbs.db
+.env
+firebase/functions/node_modules/

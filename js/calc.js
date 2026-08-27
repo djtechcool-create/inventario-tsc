@@ -1,71 +1,100 @@
-/* ============================================================
-   CALCULADORA DE CONTEO POR PALLETS Y SACOS
-   Calcula automáticamente sin que el usuario haga matemáticas.
-   Reglas:
-   - Todo PALLET COMPLETO = sacos BUENOS automáticamente.
-   - Pallets incompletos = se descomponen en sacos individuales.
-   - Múltiples grupos de pallets (distintos tamaños).
-   - Sacos individuales por estado.
-   - Retorna estados {buenos, danados, arreglados, reempacados, ...} y total.
-   ============================================================ */
-const Calc = (() => {
+const Calculator = {
+  createEmptyGroup() {
+    return { pallets: 0, sacosPerPallet: 0, total: 0 };
+  },
 
-  function defaultState() {
-    return { buenos: 0, danados: 0, arreglados: 0, reempacados: 0 };
-  }
+  calculateGroupTotal(pallets, sacosPerPallet) {
+    return (Number(pallets) || 0) * (Number(sacosPerPallet) || 0);
+  },
 
-  // Calcula a partir del modelo de un conteo
-  // modelo = { palletGroups:[{qty, per}], indiv: {estado:n} }
-  // estadosExtra = lista de estados (estándar y/o dinámicos)
-  function compute(modelo, estadosExtra = []) {
-    modelo = modelo || { palletGroups: [], indiv: {} };
-    const res = {};
-    ['buenos','danados','arreglados','reempacados'].forEach(s => res[s] = 0);
-    (estadosExtra || []).forEach(s => { if (!(s in res)) res[s] = 0; });
+  calculatePalletDetail(pallets, sacosPerPallet, states) {
+    const totalFromPallets = this.calculateGroupTotal(pallets, sacosPerPallet);
+    return {
+      type: 'pallet',
+      pallets: Number(pallets) || 0,
+      sacosPerPallet: Number(sacosPerPallet) || 0,
+      total: totalFromPallets,
+      buenos: totalFromPallets,
+      danados: 0,
+      arreglados: 0,
+      reempacados: 0
+    };
+  },
 
-    let totalSacosFromPallets = 0, totalPallets = 0;
-    (modelo.palletGroups || []).forEach(g => {
-      const q = Math.max(0, parseInt(g.qty) || 0);
-      const p = Math.max(0, parseInt(g.per) || 0);
-      totalPallets += q;
-      totalSacosFromPallets += q * p;
+  calculateIndividualDetail(individualSacos) {
+    const detail = { buenos: 0, danados: 0, arreglados: 0, reempacados: 0 };
+    if (!Array.isArray(individualSacos)) return detail;
+    individualSacos.forEach(s => {
+      const state = (s.state || 'buenos').toLowerCase();
+      const qty = Number(s.quantity) || 0;
+      if (state === 'buenos') detail.buenos += qty;
+      else if (state === 'danados') detail.danados += qty;
+      else if (state === 'arreglados') detail.arreglados += qty;
+      else if (state === 'reempacados') detail.reempacados += qty;
     });
-    // Pallets completos => BUENOS
-    res.buenos += totalSacosFromPallets;
+    return detail;
+  },
 
-    // Sacos individuales por cada estado (estándar y extra), sumando
-    const indiv = modelo.indiv || {};
-    Object.keys(res).forEach(s => {
-      res[s] += Math.max(0, parseInt(indiv[s]) || 0);
-    });
+  calculateTotal(palletGroups, individualSacos) {
+    let buenos = 0, danados = 0, arreglados = 0, reempacados = 0;
 
-    let total = Object.values(res).reduce((a, b) => a + b, 0);
-    const totalSacosIndiv = (modelo.palletGroups || []).length
-      ? total - totalSacosFromPallets
-      : total;
+    if (Array.isArray(palletGroups)) {
+      palletGroups.forEach(g => {
+        const total = this.calculateGroupTotal(g.pallets, g.sacosPerPallet);
+        buenos += total;
+      });
+    }
+
+    const individual = this.calculateIndividualDetail(individualSacos);
+    buenos += individual.buenos;
+    danados += individual.danados;
+    arreglados += individual.arreglados;
+    reempacados += individual.reempacados;
 
     return {
-      estados: res,
-      total,
-      totalPallets,
-      totalSacosFromPallets,
-      totalSacosIndiv
+      buenos, danados, arreglados, reempacados,
+      total: buenos + danados + arreglados + reempacados
+    };
+  },
+
+  getSummary(palletGroups, individualSacos) {
+    const total = this.calculateTotal(palletGroups, individualSacos);
+    const groupCount = Array.isArray(palletGroups) ? palletGroups.length : 0;
+    const individualCount = Array.isArray(individualSacos) ? individualSacos.length : 0;
+
+    let palletTotal = 0;
+    if (Array.isArray(palletGroups)) {
+      palletGroups.forEach(g => {
+        palletTotal += this.calculateGroupTotal(g.pallets, g.sacosPerPallet);
+      });
+    }
+
+    return {
+      ...total,
+      groupCount,
+      individualCount,
+      palletTotal,
+      summary: `Pallets: ${palletTotal} buenos | Individuales: ${individualCount} registros`
+    };
+  },
+
+  validateDetail(detail) {
+    const errors = [];
+    if (!detail.codigo) errors.push("Código requerido");
+    if (!detail.producto) errors.push("Producto requerido");
+    if (!detail.lote) errors.push("Lote requerido");
+    const total = (detail.buenos || 0) + (detail.danados || 0) + (detail.arreglados || 0) + (detail.reempacados || 0);
+    if (total <= 0) errors.push("La cantidad total debe ser mayor a 0");
+    return errors;
+  },
+
+  buildDetailFromCalc(productInfo, palletGroups, individualSacos) {
+    const calc = this.calculateTotal(palletGroups, individualSacos);
+    return {
+      codigo: productInfo.codigo,
+      producto: productInfo.producto,
+      lote: productInfo.lote,
+      ...calc
     };
   }
-
-  // Resumen textual para mostrar en bodega
-  function resumen(modelo, estadosExtra) {
-    const c = compute(modelo, estadosExtra);
-    const lineas = [];
-    (modelo.palletGroups || []).forEach((g, i) => {
-      lineas.push(`${g.qty} pallets x ${g.per} sacos = ${(g.qty||0)*(g.per||0)} BUENOS`);
-    });
-    return { ...c, lineas };
-  }
-
-  function emptyModelo() {
-    return { palletGroups: [], indiv: {} };
-  }
-
-  return { compute, resumen, emptyModelo, defaultState };
-})();
+};

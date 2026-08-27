@@ -1,530 +1,850 @@
-/* ============================================================
-   VISTA ADMINISTRADOR (PC)
-   - Dashboard, inventarios, subir virtual, diferencias,
-     cambios de estado, reconteos, usuarios, historial.
-   - El inventario virtual se mantiene CIFRADO.
-   ============================================================ */
-const AdminView = (() => {
-  const app = document.getElementById('app');
-  let session = null;
-  let route = 'dashboard';
-  let pendingUpload = null;
-  let selectedInv = null;
-  // Semilla del módulo admin para descifrar el inventario virtual.
-  // SOLO se usa en este módulo (rol admin); el módulo bodega nunca la usa.
-  const ADMIN_KEY = 'ITSC-ADMIN-CIPHER-SEED';
-  const virtualCache = new Map();
+const AdminView = {
+  currentCycleId: null,
 
-  async function getVirtualLines(inv) {
-    if (virtualCache.has(inv.id)) return virtualCache.get(inv.id);
-    const cipher = DB.getVirtualCipher(inv.virtualRef);
-    if (!cipher) return [];
+  async init() {
+    this.bindEvents();
+    await this.loadDashboard();
+  },
+
+  bindEvents() {
+    document.querySelectorAll('.nav-item[data-view]').forEach(item => {
+      item.addEventListener('click', (e) => {
+        e.preventDefault();
+        const view = item.dataset.view;
+        document.querySelectorAll('.nav-item[data-view]').forEach(n => n.classList.remove('active'));
+        item.classList.add('active');
+        document.querySelectorAll('#admin-content .view').forEach(v => v.classList.remove('active'));
+        document.getElementById(`admin-view-${view}`).classList.add('active');
+        this.loadView(view);
+      });
+    });
+  },
+
+  async loadView(view) {
+    switch (view) {
+      case 'dashboard': await this.loadDashboard(); break;
+      case 'cycles': await this.loadCycles(); break;
+      case 'import': await this.loadImport(); break;
+      case 'counts': await this.loadCounts(); break;
+      case 'compare': await this.loadCompare(); break;
+      case 'recounts': await this.loadRecounts(); break;
+      case 'reconcile': await this.loadReconcile(); break;
+      case 'reports': await this.loadReports(); break;
+      case 'users': await this.loadUsers(); break;
+    }
+  },
+
+  async loadDashboard() {
+    const container = document.getElementById('admin-view-dashboard');
+    container.innerHTML = '<div class="loading">Cargando dashboard...</div>';
     try {
-      const lines = JSON.parse(await DB.decryptAES(cipher.iv, cipher.data, ADMIN_KEY, inv.virtualSalt));
-      virtualCache.set(inv.id, lines);
-      return lines;
-    } catch (e) {
-      console.error('No se pudo descifrar el inventario virtual', e);
-      return [];
-    }
-  }
+      const cycles = await DB.getCycles();
+      const activeCycle = cycles.find(c => c.status !== 'CERRADO' && c.status !== 'BORRADOR');
+      let stats = { totalCycles: cycles.length, openCycles: 0, virtualImported: 0 };
 
-  function init(s) { session = s; nav('dashboard'); }
+      cycles.forEach(c => {
+        if (['CONTEO_ABIERTO', 'RECONTEO', 'EN_REVISION'].includes(c.status)) stats.openCycles++;
+        if (c.virtualImportId) stats.virtualImported++;
+      });
 
-  function logout() { DB.logout(); location.reload(); }
-  function toggleMenu() { document.getElementById('sidebar').classList.toggle('open'); }
+      let cycleDetails = [];
+      for (const cycle of cycles.slice(0, 5)) {
+        const counts = await DB.getPhysicalCounts(cycle.id);
+        const pending = counts.filter(c => c.status === 'BORRADOR' || c.status === 'ENVIADO').length;
+        const approved = counts.filter(c => c.status === 'APROBADO' || c.status === 'BLOQUEADO').length;
+        cycleDetails.push({ ...cycle, countPending: pending, countApproved: approved, totalCounts: counts.length });
+      }
 
-  const MENU = [
-    { id: 'dashboard', icon: '📊', label: 'Dashboard' },
-    { id: 'inventarios', icon: '📋', label: 'Inventarios' },
-    { id: 'subir', icon: '⬆️', label: 'Subir inventario virtual' },
-    { id: 'usuarios', icon: '👥', label: 'Usuarios' },
-    { id: 'reportes', icon: '📈', label: 'Reportes' },
-    { id: 'historial', icon: '🕘', label: 'Historial' }
-  ];
-
-  function nav(routeId) {
-    route = routeId;
-    if (routeId === 'dashboard') renderDashboard();
-    else if (routeId === 'inventarios') renderInventarios();
-    else if (routeId === 'subir') renderUpload();
-    else if (routeId === 'usuarios') renderUsuarios();
-    else if (routeId === 'reportes') ReportView.init(session);
-    else if (routeId === 'historial') renderHistorial();
-  }
-
-  function shell(content) {
-    app.innerHTML = `
-      <div class="layout">
-        <div class="sidebar" id="sidebar">
-          <div class="brand">Inventario TSC<small>Panel de Administración</small></div>
-          <nav>
-            ${MENU.map(m => `<a href="#" class="${m.id===route?'active':''}" data-nav="${m.id}" onclick="AdminView.nav('${m.id}')">${m.icon} ${m.label}</a>`).join('')}
-          </nav>
-          <div class="foot">
-            <div><b>${UI.esc(session.name)}</b> (Admin)</div>
-            <button class="btn btn-sm btn-outline" style="margin-top:8px;width:100%" onclick="AdminView.logout()">Cerrar sesión</button>
+      container.innerHTML = `
+        <h2>Dashboard</h2>
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-number">${stats.totalCycles}</div>
+            <div class="stat-label">Inventarios Totales</div>
+          </div>
+          <div class="stat-card stat-active">
+            <div class="stat-number">${stats.openCycles}</div>
+            <div class="stat-label">Inventarios Activos</div>
+          </div>
+          <div class="stat-card stat-success">
+            <div class="stat-number">${stats.virtualImported}</div>
+            <div class="stat-label">Con Virtual Importado</div>
           </div>
         </div>
-        <button class="menu-toggle" onclick="AdminView.toggleMenu()">☰</button>
-        <div class="main">
-          <div class="topbar">
-            <div class="page-title">${MENU.find(m=>m.id===route)?.label || ''}</div>
-            <span class="hint">${new Date().toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}</span>
-          </div>
-          ${content}
+        <h3>Inventarios Recientes</h3>
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Nombre</th>
+                <th>Estado</th>
+                <th>Conteos</th>
+                <th>Pendientes</th>
+                <th>Aprobados</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${cycleDetails.map(c => `
+                <tr>
+                  <td>${c.name}</td>
+                  <td>${UI.statusBadge(c.status)}</td>
+                  <td>${c.totalCounts}</td>
+                  <td>${c.countPending}</td>
+                  <td>${c.countApproved}</td>
+                  <td>
+                    <button class="btn btn-sm btn-outline" onclick="AdminView.selectCycle('${c.id}')">Seleccionar</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
         </div>
-      </div>`;
-  }
-
-  // ============ DASHBOARD ============
-  async function renderDashboard() {
-    const invs = DB.listInventories();
-    const latest = invs[invs.length - 1] || null;
-    let cards = '';
-    if (latest) {
-      const data = await buildComparison(latest);
-      cards = `
-        <div class="card"><h3>TOTAL VIRTUAL (sacos)</h3><div class="stat-value">${UI.money(data.summary.totalVirtual)}</div></div>
-        <div class="card"><h3>TOTAL FÍSICO (sacos)</h3><div class="stat-value">${UI.money(data.summary.totalFisico)}</div></div>
-        <div class="card"><h3>FALTANTE</h3><div class="stat-value bad">${UI.money(data.summary.sacosFaltantes)}</div></div>
-        <div class="card"><h3>SOBRANTE</h3><div class="stat-value warnc">${UI.money(data.summary.sacosSobrantes)}</div></div>
-        <div class="card"><h3>Cambios de estado (sacos)</h3><div class="stat-value warnc">${data.resumenEstados}</div></div>
-        <div class="card"><h3>Lotes cuadrados</h3><div class="stat-value ok">${data.summary.cuadrados}/${data.summary.totalRegistros}</div></div>
-        <div class="card"><h3>Coincidencia</h3><div class="stat-value ${data.summary.pctCoincidencia>=90?'ok':'warnc'}">${data.summary.pctCoincidencia}%</div></div>
-        <div class="card"><h3>Estado del inventario</h3><div class="stat-value" style="font-size:1rem">${statusPill(latest.status)}</div></div>`;
-    } else {
-      cards = `<div class="card"><p class="hint">No hay inventarios todavía. Sube un inventario virtual para comenzar.</p></div>`;
+        ${cycles.length === 0 ? '<p class="empty-state">No hay inventarios creados. Cree uno desde la pestaña Inventarios.</p>' : ''}
+      `;
+    } catch (err) {
+      container.innerHTML = `<div class="error-state">Error: ${err.message}</div>`;
     }
+  },
 
-    const pendientes = invs.filter(i => ['EN CONTEO','RECONTEO','BORRADOR','PENDIENTE DE REVISIÓN'].includes(i.status)).length;
-    const finalizados = invs.filter(i => ['FINALIZADO','CON DIFERENCIAS','CONCILIADO','CERRADO'].includes(i.status)).length;
-    const porEstado = {}
-    invs.forEach(i => porEstado[i.status] = (porEstado[i.status]||0)+1);
+  async loadCycles() {
+    const container = document.getElementById('admin-view-cycles');
+    container.innerHTML = '<div class="loading">Cargando inventarios...</div>';
+    try {
+      const cycles = await DB.getCycles();
+      container.innerHTML = `
+        <div class="view-header">
+          <h2>Inventarios Semanales</h2>
+          <button class="btn btn-primary" onclick="AdminView.showCreateCycle()">+ Nuevo Inventario</button>
+        </div>
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Nombre</th>
+                <th>Estado</th>
+                <th>Creado</th>
+                <th>Virtual</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${cycles.map(c => `
+                <tr>
+                  <td><strong>${c.name}</strong></td>
+                  <td>${UI.statusBadge(c.status)}</td>
+                  <td>${UI.formatDate(c.createdAt)}</td>
+                  <td>${c.virtualImportId ? '✓ Importado' : 'Pendiente'}</td>
+                  <td class="actions-cell">
+                    <button class="btn btn-sm btn-outline" onclick="AdminView.selectCycle('${c.id}')">Seleccionar</button>
+                    ${c.status === 'CONCILIADO' ? `<button class="btn btn-sm btn-success" onclick="AdminView.closeCycle('${c.id}')">Cerrar</button>` : ''}
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+        ${cycles.length === 0 ? '<p class="empty-state">No hay inventarios creados aún.</p>' : ''}
+      `;
+    } catch (err) {
+      container.innerHTML = `<div class="error-state">Error: ${err.message}</div>`;
+    }
+  },
 
-    shell(`
-      <div class="grid grid-4" style="margin-bottom:20px">
-        <div class="card"><h3>Total productos</h3><div class="stat-value">${invs.length?latest?.productos||0:0}</div></div>
-        <div class="card"><h3>Total lotes</h3><div class="stat-value">${invs.length?latest?.lotes||0:0}</div></div>
-        <div class="card"><h3>Inventarios</h3><div class="stat-value">${invs.length}</div></div>
-        <div class="card"><h3>Estado actual</h3><div class="stat-value" style="font-size:1rem">${invs.length?statusPill(latest.status):'—'}</div></div>
+  async showCreateCycle() {
+    UI.showModal('Crear Inventario Semanal', `
+      <div class="form-group">
+        <label>Nombre del inventario</label>
+        <input type="text" id="cycle-name" class="form-control" placeholder="Ej: Inventario Semana 35 - 2026" required>
       </div>
-      <div class="grid grid-4" style="margin-bottom:20px">
-        <div class="card"><h3>Pendientes</h3><div class="stat-value warnc">${pendientes}</div></div>
-        <div class="card"><h3>Finalizados</h3><div class="stat-value ok">${finalizados}</div></div>
-        ${Object.entries(porEstado).map(([s,n])=>`<div class="card"><h3>${UI.esc(s)}</h3><div class="stat-value">${n}</div></div>`).join('')}
+      <div class="form-group">
+        <label>Descripción (opcional)</label>
+        <textarea id="cycle-desc" class="form-control" rows="2" placeholder="Descripción del inventario..."></textarea>
       </div>
-      <h3 style="margin-bottom:10px">Inventario actual: ${latest?UI.esc(latest.name):'ninguno'}</h3>
-      <div class="grid grid-4">${cards}</div>
-      ${latest ? `<div style="margin-top:20px" class="table-wrap card"><h3 style="margin-bottom:10px">Resumen por producto (último inventario)</h3>${resumenTabla(latest)}</div>` : ''}
+    `, `
+      <button class="btn btn-secondary" onclick="UI.closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="AdminView.createCycle()">Crear</button>
     `);
-  }
+  },
 
-  // ============ INVENTARIOS ============
-  async function renderInventarios(selId) {
-    const invs = DB.listInventories().slice().reverse();
-    if (selId) selectedInv = DB.getInventory(selId);
-    let detailHtml = '';
-    if (selectedInv) detailHtml = await invDetail(selectedInv);
-    shell(`
-      <div class="table-wrap card">
-        <h3 style="margin-bottom:10px">Inventarios semanales</h3>
-        <table>
-          <thead><tr><th>ID</th><th>Nombre</th><th>Estado</th><th>Fecha virtual</th><th>Lotes</th><th>Acciones</th></tr></thead>
+  async createCycle() {
+    const name = document.getElementById('cycle-name').value.trim();
+    const description = document.getElementById('cycle-desc').value.trim();
+    if (!name) { UI.toast('Ingrese un nombre', 'error'); return; }
+
+    try {
+      const cycleId = await DB.createCycle({
+        name, description,
+        createdBy: Auth.currentUser.uid
+      });
+      UI.closeModal();
+      UI.toast('Inventario creado exitosamente', 'success');
+      this.currentCycleId = cycleId;
+      await this.loadCycles();
+    } catch (err) {
+      UI.toast('Error: ' + err.message, 'error');
+    }
+  },
+
+  selectCycle(cycleId) {
+    this.currentCycleId = cycleId;
+    UI.toast('Inventario seleccionado', 'info');
+  },
+
+  async closeCycle(cycleId) {
+    if (!await UI.confirm('¿Está seguro de cerrar este inventario? No se podrán hacer más cambios.')) return;
+    try {
+      await DB.callFunction('closeCycle', { cycleId });
+      UI.toast('Inventario cerrado', 'success');
+      await this.loadCycles();
+    } catch (err) {
+      UI.toast('Error: ' + err.message, 'error');
+    }
+  },
+
+  async loadImport() {
+    const container = document.getElementById('admin-view-import');
+    const cycles = await DB.getCycles();
+    const activeCycles = cycles.filter(c => c.status !== 'CERRADO');
+
+    container.innerHTML = `
+      <div class="view-header">
+        <h2>Importar Inventario Virtual</h2>
+      </div>
+      <div class="card">
+        <div class="form-group">
+          <label>Seleccionar inventario semanal</label>
+          <select id="import-cycle" class="form-control">
+            <option value="">-- Seleccionar --</option>
+            ${activeCycles.map(c => `<option value="${c.id}">${c.name} (${c.status})</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Archivo Excel</label>
+          <div class="file-upload" id="file-upload-area">
+            <input type="file" id="import-file" accept=".xlsx,.xls" style="display:none">
+            <button class="btn btn-outline" onclick="document.getElementById('import-file').click()">
+              Seleccionar archivo Excel
+            </button>
+            <span id="file-name" class="file-name">Ningún archivo seleccionado</span>
+          </div>
+        </div>
+        <div id="import-preview" style="display:none"></div>
+        <div id="import-errors" style="display:none"></div>
+        <button class="btn btn-primary" id="import-btn" onclick="AdminView.importExcel()" disabled>
+          <span class="btn-text">Importar Inventario Virtual</span>
+          <span class="btn-loader" style="display:none"></span>
+        </button>
+      </div>
+    `;
+
+    document.getElementById('import-file').addEventListener('change', (e) => this.previewExcel(e));
+  },
+
+  async previewExcel(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    document.getElementById('file-name').textContent = file.name;
+    UI.setLoading('import-btn', true);
+    document.getElementById('import-btn').disabled = true;
+
+    try {
+      const workbook = await ExcelUtil.parseFile(file);
+      const analysis = ExcelUtil.analyzeWorkbook(workbook);
+      const preview = document.getElementById('import-preview');
+      const errorsDiv = document.getElementById('import-errors');
+
+      preview.style.display = 'block';
+      preview.innerHTML = `
+        <h4>Vista previa del archivo</h4>
+        <p><strong>Hoja:</strong> ${analysis.sheetName} | <strong>Registros:</strong> ${analysis.totalRows}</p>
+        <p><strong>Estados detectados:</strong> ${analysis.states.join(', ')}</p>
+        <table class="data-table data-table-sm">
+          <thead>
+            <tr>
+              ${analysis.headers.slice(0, 10).map(h => `<th>${h}</th>`).join('')}
+            </tr>
+          </thead>
           <tbody>
-            ${invs.length===0?'<tr><td colspan="6" class="hint">Sin inventarios. Sube el inventario virtual.</td></tr>':
-              invs.map(i=>`<tr>
-                <td>${UI.esc(i.id)}</td>
-                <td><b>${UI.esc(i.name)}</b></td>
-                <td>${statusPill(i.status)}</td>
-                <td class="num">${i.virtualDate?UI.esc(i.virtualDate.slice(0,10)):'—'}</td>
-                <td class="num">${i.lotes||0}</td>
-                <td>
-                  <button class="btn btn-sm btn-outline" onclick="AdminView.detailInventory('${i.id}')">Detalle</button>
-                  ${['EN CONTEO','RECONTEO'].includes(i.status) ? `<button class="btn btn-sm btn-warn" onclick="AdminView.reopen('${i.id}')">Reabrir/Recuento</button>` : ''}
-                  ${['FINALIZADO','CON DIFERENCIAS','CONCILIADO'].includes(i.status) ? `<button class="btn btn-sm btn-success" onclick="AdminView.conciliar('${i.id}')">Conciliar</button>` : ''}
-                </td>
-              </tr>`).join('')}
+            ${analysis.items.slice(0, 5).map(item => `
+              <tr>
+                <td>${item.codigo}</td>
+                <td>${item.producto}</td>
+                <td>${item.lote}</td>
+                <td>${UI.formatNumber(item.ingresos)}</td>
+                <td>${UI.formatNumber(item.egresos)}</td>
+                <td>${UI.formatNumber(item.saldo)}</td>
+                <td>${UI.formatNumber(item.buenos)}</td>
+                <td>${UI.formatNumber(item.danados)}</td>
+                <td>${UI.formatNumber(item.arreglados)}</td>
+                <td>${UI.formatNumber(item.reempacados)}</td>
+              </tr>
+            `).join('')}
+            ${analysis.items.length > 5 ? `<tr><td colspan="10" class="text-center">... y ${analysis.items.length - 5} registros más</td></tr>` : ''}
+          </tbody>
+        </table>
+      `;
+
+      if (analysis.errors.length > 0) {
+        errorsDiv.style.display = 'block';
+        errorsDiv.innerHTML = `
+          <div class="warning-box">
+            <strong>Advertencias (${analysis.errors.length}):</strong>
+            <ul>${analysis.errors.slice(0, 10).map(e => `<li>Fila ${e.row}: ${e.message}</li>`).join('')}</ul>
+          </div>
+        `;
+      }
+
+      this._pendingAnalysis = analysis;
+      const cycleId = document.getElementById('import-cycle').value;
+      document.getElementById('import-btn').disabled = !cycleId;
+    } catch (err) {
+      UI.toast('Error al analizar archivo: ' + err.message, 'error');
+    } finally {
+      UI.setLoading('import-btn', false);
+    }
+  },
+
+  async importExcel() {
+    const cycleId = document.getElementById('import-cycle').value;
+    if (!cycleId) { UI.toast('Seleccione un inventario', 'error'); return; }
+
+    const file = document.getElementById('import-file').files[0];
+    if (!file) { UI.toast('Seleccione un archivo', 'error'); return; }
+
+    if (!await UI.confirm('¿Importar este inventario virtual? Se reemplazará cualquier importación anterior.')) return;
+
+    UI.setLoading('import-btn', true);
+    try {
+      const fileBase64 = await ExcelUtil.fileToBase64(file);
+      const result = await DB.callFunction('importVirtualInventory', {
+        cycleId, fileBase64, fileName: file.name
+      });
+
+      UI.toast(`Importados ${result.data.itemCount} registros exitosamente`, 'success');
+      if (result.data.errors && result.data.errors.length > 0) {
+        UI.toast(`${result.data.errors.length} advertencias encontradas`, 'warning');
+      }
+      await this.loadImport();
+    } catch (err) {
+      UI.toast('Error: ' + err.message, 'error');
+    } finally {
+      UI.setLoading('import-btn', false);
+    }
+  },
+
+  async loadCounts() {
+    const container = document.getElementById('admin-view-counts');
+    if (!this.currentCycleId) {
+      container.innerHTML = '<p class="empty-state">Seleccione un inventario desde el Dashboard o la pestaña Inventarios.</p>';
+      return;
+    }
+
+    container.innerHTML = '<div class="loading">Cargando conteos...</div>';
+    try {
+      const cycle = await DB.getCycle(this.currentCycleId);
+      const counts = await DB.getPhysicalCounts(this.currentCycleId);
+      const draftCounts = counts.filter(c => c.status === 'BORRADOR' || c.status === 'ENVIADO');
+      const approvedCounts = counts.filter(c => c.status === 'APROBADO' || c.status === 'BLOQUEADO');
+
+      container.innerHTML = `
+        <div class="view-header">
+          <h2>Conteos Físicos - ${cycle?.name || ''}</h2>
+          <div class="btn-group">
+            <button class="btn btn-outline" onclick="AdminView.blockAllCounts()">Bloquear Aprobados</button>
+          </div>
+        </div>
+        <div class="stats-row">
+          <span class="stat-inline">Total: <strong>${counts.length}</strong></span>
+          <span class="stat-inline">Pendientes: <strong>${draftCounts.length}</strong></span>
+          <span class="stat-inline">Aprobados: <strong>${approvedCounts.length}</strong></span>
+        </div>
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Fecha</th>
+                <th>Usuario</th>
+                <th>Registros</th>
+                <th>Total</th>
+                <th>Estado</th>
+                <th>Versión</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${counts.map(c => {
+                const totalQty = (c.detail || []).reduce((sum, d) => sum + (d.buenos||0) + (d.danados||0) + (d.arreglados||0) + (d.reempacados||0), 0);
+                return `
+                  <tr>
+                    <td>${UI.formatDateTime(c.createdAt)}</td>
+                    <td>${c.userId?.substring(0, 8)}...</td>
+                    <td>${(c.detail || []).length}</td>
+                    <td>${UI.formatNumber(totalQty)}</td>
+                    <td>${UI.statusBadge(c.status)}</td>
+                    <td>${c.version || 1}</td>
+                    <td class="actions-cell">
+                      ${c.status === 'BORRADOR' || c.status === 'ENVIADO' ? `
+                        <button class="btn btn-sm btn-success" onclick="AdminView.approveCount('${c.id}', true)">Aprobar</button>
+                        <button class="btn btn-sm btn-danger" onclick="AdminView.approveCount('${c.id}', false)">Rechazar</button>
+                      ` : ''}
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+        ${counts.length === 0 ? '<p class="empty-state">No hay conteos registrados aún.</p>' : ''}
+      `;
+    } catch (err) {
+      container.innerHTML = `<div class="error-state">Error: ${err.message}</div>`;
+    }
+  },
+
+  async approveCount(countId, approved) {
+    if (!await UI.confirm(approved ? '¿Aprobar este conteo?' : '¿Rechazar este conteo?')) return;
+    try {
+      await DB.callFunction('approvePhysicalCount', {
+        cycleId: this.currentCycleId, countId, approved
+      });
+      UI.toast(approved ? 'Conteo aprobado' : 'Conteo rechazado', 'success');
+      await this.loadCounts();
+    } catch (err) {
+      UI.toast('Error: ' + err.message, 'error');
+    }
+  },
+
+  async blockAllCounts() {
+    if (!await UI.confirm('¿Bloquear todos los conteos aprobados? No se podrán editar.')) return;
+    try {
+      const result = await DB.callFunction('blockPhysicalCounts', { cycleId: this.currentCycleId });
+      UI.toast(`${result.data.blocked} conteos bloqueados`, 'success');
+      await this.loadCounts();
+    } catch (err) {
+      UI.toast('Error: ' + err.message, 'error');
+    }
+  },
+
+  async loadCompare() {
+    const container = document.getElementById('admin-view-compare');
+    if (!this.currentCycleId) {
+      container.innerHTML = '<p class="empty-state">Seleccione un inventario.</p>';
+      return;
+    }
+
+    container.innerHTML = '<div class="loading">Cargando comparación...</div>';
+    try {
+      const cycle = await DB.getCycle(this.currentCycleId);
+      const comparisons = await DB.getComparisons(this.currentCycleId);
+      const latest = comparisons[0];
+
+      container.innerHTML = `
+        <div class="view-header">
+          <h2>Comparación Virtual vs Físico - ${cycle?.name || ''}</h2>
+          <button class="btn btn-primary" onclick="AdminView.runComparison()">Ejecutar Comparación</button>
+        </div>
+        ${latest ? `
+          <div class="card">
+            <h4>Última Comparación - ${UI.formatDateTime(latest.createdAt)}</h4>
+            <div class="stats-grid">
+              <div class="stat-card"><div class="stat-number">${latest.summary.total}</div><div class="stat-label">Total</div></div>
+              <div class="stat-card stat-success"><div class="stat-number">${latest.summary.sinDiferencia}</div><div class="stat-label">Sin diferencia</div></div>
+              <div class="stat-card stat-danger"><div class="stat-number">${latest.summary.faltantes}</div><div class="stat-label">Faltantes</div></div>
+              <div class="stat-card stat-warning"><div class="stat-number">${latest.summary.sobrantes}</div><div class="stat-label">Sobrantes</div></div>
+              <div class="stat-card"><div class="stat-number" style="color:#7c3aed">${latest.summary.cambioEstado}</div><div class="stat-label">Cambios estado</div></div>
+            </div>
+            <div class="table-responsive">
+              <table class="data-table data-table-sm">
+                <thead>
+                  <tr>
+                    <th>Código</th><th>Producto</th><th>Lote</th>
+                    <th>Virtual</th><th>Físico</th><th>Dif.</th><th>Tipo</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${latest.results.map(r => `
+                    <tr class="${r.tipo !== 'SIN_DIFERENCIA' ? 'row-highlight' : ''}">
+                      <td>${r.codigo}</td><td>${r.producto}</td><td>${r.lote}</td>
+                      <td>${UI.formatNumber(r.virtual.total)}</td>
+                      <td>${UI.formatNumber(r.physical.total)}</td>
+                      <td class="${r.diferencia < 0 ? 'text-danger' : r.diferencia > 0 ? 'text-warning' : ''}">${UI.formatNumber(r.diferencia)}</td>
+                      <td>${UI.diffBadge(r.tipo)}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+            <button class="btn btn-outline" onclick="AdminView.exportComparison()">Exportar Excel</button>
+          </div>
+        ` : '<p class="empty-state">No hay comparaciones ejecutadas aún.</p>'}
+      `;
+    } catch (err) {
+      container.innerHTML = `<div class="error-state">Error: ${err.message}</div>`;
+    }
+  },
+
+  async runComparison() {
+    if (!await UI.confirm('¿Ejecutar comparación virtual vs físico?')) return;
+    try {
+      const result = await DB.callFunction('runComparison', { cycleId: this.currentCycleId });
+      UI.toast('Comparación ejecutada', 'success');
+      await this.loadCompare();
+    } catch (err) {
+      UI.toast('Error: ' + err.message, 'error');
+    }
+  },
+
+  async exportComparison() {
+    try {
+      const comparisons = await DB.getComparisons(this.currentCycleId);
+      if (!comparisons[0]) { UI.toast('No hay comparación', 'error'); return; }
+      ExcelUtil.exportComparisonToExcel(comparisons[0]);
+      UI.toast('Exportado correctamente', 'success');
+    } catch (err) {
+      UI.toast('Error: ' + err.message, 'error');
+    }
+  },
+
+  async loadRecounts() {
+    const container = document.getElementById('admin-view-recounts');
+    if (!this.currentCycleId) {
+      container.innerHTML = '<p class="empty-state">Seleccione un inventario.</p>';
+      return;
+    }
+
+    container.innerHTML = '<div class="loading">Cargando reconteos...</div>';
+    try {
+      const requests = await DB.getRecountRequests(this.currentCycleId);
+      const users = await Auth.getAllUsers();
+      const userMap = {};
+      users.forEach(u => userMap[u.uid] = u.email || u.uid.substring(0, 8));
+
+      container.innerHTML = `
+        <div class="view-header">
+          <h2>Solicitudes de Reconteo</h2>
+          <button class="btn btn-primary" onclick="AdminView.showCreateRecount()">+ Solicitar Reconteo</button>
+        </div>
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Producto/Lote</th>
+                <th>Motivo</th>
+                <th>Asignado a</th>
+                <th>Estado</th>
+                <th>Fecha</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${requests.map(r => `
+                <tr>
+                  <td>${r.productKey}</td>
+                  <td>${r.motivo}</td>
+                  <td>${userMap[r.assignedTo] || r.assignedTo?.substring(0, 8)}</td>
+                  <td>${UI.statusBadge(r.status)}</td>
+                  <td>${UI.formatDateTime(r.createdAt)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+        ${requests.length === 0 ? '<p class="empty-state">No hay reconteos solicitados.</p>' : ''}
+      `;
+    } catch (err) {
+      container.innerHTML = `<div class="error-state">Error: ${err.message}</div>`;
+    }
+  },
+
+  async showCreateRecount() {
+    const users = await Auth.getAllUsers();
+    const bodegaUsers = users.filter(u => u.role === 'BODEGA');
+
+    UI.showModal('Solicitar Reconteo', `
+      <div class="form-group">
+        <label>Producto/Lote (formato: Código|Producto|Lote)</label>
+        <input type="text" id="recount-key" class="form-control" placeholder="01-001|LECHE DESCREMADA|Z53100017">
+      </div>
+      <div class="form-group">
+        <label>Motivo</label>
+        <textarea id="recount-motivo" class="form-control" rows="2" placeholder="Motivo del reconteo..."></textarea>
+      </div>
+      <div class="form-group">
+        <label>Asignar a</label>
+        <select id="recount-assigned" class="form-control">
+          ${bodegaUsers.map(u => `<option value="${u.uid}">${u.email || u.uid}</option>`).join('')}
+        </select>
+      </div>
+    `, `
+      <button class="btn btn-secondary" onclick="UI.closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="AdminView.createRecount()">Crear</button>
+    `);
+  },
+
+  async createRecount() {
+    const productKey = document.getElementById('recount-key').value.trim();
+    const motivo = document.getElementById('recount-motivo').value.trim();
+    const assignedTo = document.getElementById('recount-assigned').value;
+
+    if (!productKey || !motivo || !assignedTo) {
+      UI.toast('Todos los campos son requeridos', 'error');
+      return;
+    }
+
+    try {
+      await DB.callFunction('createRecountRequest', {
+        cycleId: this.currentCycleId, productKey, motivo, assignedTo
+      });
+      UI.closeModal();
+      UI.toast('Reconteo solicitado', 'success');
+      await this.loadRecounts();
+    } catch (err) {
+      UI.toast('Error: ' + err.message, 'error');
+    }
+  },
+
+  async loadReconcile() {
+    const container = document.getElementById('admin-view-reconcile');
+    if (!this.currentCycleId) {
+      container.innerHTML = '<p class="empty-state">Seleccione un inventario.</p>';
+      return;
+    }
+
+    container.innerHTML = '<div class="loading">Cargando...</div>';
+    try {
+      const cycle = await DB.getCycle(this.currentCycleId);
+      const comparisons = await DB.getComparisons(this.currentCycleId);
+      const latest = comparisons[0];
+      const reconciliations = await DB.getReconciliations(this.currentCycleId);
+
+      container.innerHTML = `
+        <div class="view-header">
+          <h2>Conciliación - ${cycle?.name || ''}</h2>
+        </div>
+        ${reconciliations.length > 0 ? `
+          <div class="card">
+            <h4>Historial de Conciliaciones</h4>
+            ${reconciliations.map(r => `
+              <div class="reconciliation-item">
+                <p><strong>Fecha:</strong> ${UI.formatDateTime(r.createdAt)}</p>
+                <p><strong>Notas:</strong> ${r.notes || '-'}</p>
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
+        ${latest ? `
+          <div class="card">
+            <h4>Conciliación Pendiente</h4>
+            <p>Faltantes: ${latest.summary.faltantes} | Sobrantes: ${latest.summary.sobrantes} | Cambios de estado: ${latest.summary.cambioEstado}</p>
+            <div class="form-group">
+              <label>Notas de conciliación</label>
+              <textarea id="reconcile-notes" class="form-control" rows="3" placeholder="Observaciones de la conciliación..."></textarea>
+            </div>
+            <button class="btn btn-success" onclick="AdminView.runReconcile()">Confirmar Conciliación</button>
+          </div>
+        ` : '<p class="empty-state">No hay comparaciones para conciliar.</p>'}
+      `;
+    } catch (err) {
+      container.innerHTML = `<div class="error-state">Error: ${err.message}</div>`;
+    }
+  },
+
+  async runReconcile() {
+    if (!await UI.confirm('¿Confirmar conciliación? Se actualizará el inventario virtual.')) return;
+
+    try {
+      const comparisons = await DB.getComparisons(this.currentCycleId);
+      const latest = comparisons[0];
+      if (!latest) throw new Error('No hay comparación');
+
+      const notes = document.getElementById('reconcile-notes')?.value || '';
+
+      await DB.callFunction('reconcileInventory', {
+        cycleId: this.currentCycleId,
+        comparisonId: latest.id,
+        acceptedCounts: [],
+        adjustments: {},
+        notes
+      });
+
+      UI.toast('Inventario conciliado', 'success');
+      await this.loadReconcile();
+    } catch (err) {
+      UI.toast('Error: ' + err.message, 'error');
+    }
+  },
+
+  async loadReports() {
+    const container = document.getElementById('admin-view-reports');
+    if (!this.currentCycleId) {
+      container.innerHTML = '<p class="empty-state">Seleccione un inventario.</p>';
+      return;
+    }
+
+    container.innerHTML = '<div class="loading">Cargando reportes...</div>';
+    try {
+      const cycle = await DB.getCycle(this.currentCycleId);
+      const virtualItems = await DB.getVirtualItems(cycle?.virtualImportId || '');
+      const counts = await DB.getPhysicalCounts(this.currentCycleId);
+      const comparisons = await DB.getComparisons(this.currentCycleId);
+
+      container.innerHTML = `
+        <div class="view-header">
+          <h2>Reportes y Exportaciones</h2>
+        </div>
+        <div class="reports-grid">
+          <div class="report-card">
+            <h4>Inventario Virtual</h4>
+            <p>${virtualItems.length} registros</p>
+            <button class="btn btn-outline" onclick="AdminView.exportVirtual()" ${virtualItems.length === 0 ? 'disabled' : ''}>Exportar Excel</button>
+          </div>
+          <div class="report-card">
+            <h4>Conteos Físicos</h4>
+            <p>${counts.length} conteos</p>
+            <button class="btn btn-outline" onclick="AdminView.exportPhysicalCounts()" ${counts.length === 0 ? 'disabled' : ''}>Exportar Excel</button>
+          </div>
+          <div class="report-card">
+            <h4>Comparación</h4>
+            <p>${comparisons.length > 0 ? 'Disponible' : 'No ejecutada'}</p>
+            <button class="btn btn-outline" onclick="AdminView.exportComparison()" ${comparisons.length === 0 ? 'disabled' : ''}>Exportar Excel</button>
+          </div>
+          <div class="report-card">
+            <h4>Auditoría</h4>
+            <p>Historial de acciones</p>
+            <button class="btn btn-outline" onclick="AdminView.showAuditLog()">Ver Log</button>
+          </div>
+        </div>
+      `;
+    } catch (err) {
+      container.innerHTML = `<div class="error-state">Error: ${err.message}</div>`;
+    }
+  },
+
+  async exportVirtual() {
+    try {
+      const cycle = await DB.getCycle(this.currentCycleId);
+      const items = await DB.getVirtualItems(cycle?.virtualImportId || '');
+      ExcelUtil.exportVirtualToExcel(items);
+      UI.toast('Exportado', 'success');
+    } catch (err) { UI.toast('Error: ' + err.message, 'error'); }
+  },
+
+  async exportPhysicalCounts() {
+    try {
+      const counts = await DB.getPhysicalCounts(this.currentCycleId);
+      ExcelUtil.exportPhysicalCountsToExcel(counts);
+      UI.toast('Exportado', 'success');
+    } catch (err) { UI.toast('Error: ' + err.message, 'error'); }
+  },
+
+  async showAuditLog() {
+    const logs = await DB.getAuditLogs({ cycleId: this.currentCycleId });
+    UI.showModal('Log de Auditoría', `
+      <div class="table-responsive">
+        <table class="data-table data-table-sm">
+          <thead><tr><th>Fecha</th><th>Acción</th><th>Usuario</th><th>Detalles</th></tr></thead>
+          <tbody>
+            ${logs.map(l => `
+              <tr>
+                <td>${UI.formatDateTime(l.timestamp)}</td>
+                <td>${l.action}</td>
+                <td>${l.userId?.substring(0, 8)}</td>
+                <td><pre>${JSON.stringify(l.details, null, 1)}</pre></td>
+              </tr>
+            `).join('')}
           </tbody>
         </table>
       </div>
-      ${detailHtml}
-    `);
-  }
+    `, '<button class="btn btn-secondary" onclick="UI.closeModal()">Cerrar</button>');
+  },
 
-  function detailInventory(id) {
-    selectedInv = DB.getInventory(id);
-    renderInventarios(id);
-  }
-
-  async function invDetail(inv) {
-    const data = await buildComparison(inv);
-    return `
-      <div class="card" style="margin-top:20px">
-        <h3 style="margin-bottom:4px">${UI.esc(inv.name)} <span style="font-weight:400;color:var(--muted)">(${inv.id})</span></h3>
-        <p class="hint">Estado: ${statusPill(inv.status)} · Virtual date: ${inv.virtualDate?UI.esc(inv.virtualDate.slice(0,10)):'—'}</p>
-        <div class="grid grid-4" style="margin-top:14px">
-          <div class="card"><h3>Total virtual</h3><div class="stat-value">${UI.money(data.summary.totalVirtual)}</div></div>
-          <div class="card"><h3>Total físico</h3><div class="stat-value">${UI.money(data.summary.totalFisico)}</div></div>
-          <div class="card"><h3>Faltante</h3><div class="stat-value bad">${UI.money(data.summary.sacosFaltantes)}</div></div>
-          <div class="card"><h3>Sobrante</h3><div class="stat-value warnc">${UI.money(data.summary.sacosSobrantes)}</div></div>
-        </div>
-        <div style="margin-top:14px">
-          <button class="btn btn-sm btn-primary" onclick="ReportView.showReport('${inv.id}')">Ver reporte detallado</button>
-          <button class="btn btn-sm btn-success" onclick="ReportView.export('${inv.id}')">Exportar a Excel</button>
-          ${['EN CONTEO','RECONTEO'].includes(inv.status) ? `<button class="btn btn-sm btn-warn" onclick="AdminView.reopen('${inv.id}')">Reabrir para reconteo</button>` : ''}
-        </div>
-        <div class="table-wrap" style="margin-top:16px"><h3 style="margin-bottom:8px">Comparación detallada</h3>${comparisonTabla(data, inv)}</div>
-      </div>`;
-  }
-
-  function reopen(id) {
-    const inv = DB.getInventory(id);
-    if (!UI.confirm('¿Reabrir el inventario para reconteo? Se conservará el conteo anterior.')) return;
-    inv.status = 'RECONTEO';
-    inv.startRecuentoAt = new Date().toISOString();
-    // permitir a los asignados recontar: restablecer done en sus tareas (sin borrar conteo anterior)
-    const assignments = new Set(inv.assignees || []);
-    assignments.forEach(uid => {
-      const tasks = DB.userTasks(uid);
-      if (tasks[id]) {
-        tasks[id].items.forEach(it => {
-          if (!it.historicConteo && it.conteo) { it.historicConteo = it.conteo; it.historicTotal = it.total; }
-          it.conteo = null; it.total = 0; it.done = false; it.completedAt = null;
-        });
-      }
-      DB.setUserTasks(uid, tasks);
-    });
-    DB.saveInventory(inv);
-    DB.addAudit({ action: 'reabrir_reconteo', user: session.username, invId: id });
-    UI.toast('Inventario reabierto para reconteo');
-    renderInventarios(id);
-  }
-
-  function conciliar(id) {
-    const inv = DB.getInventory(id);
-    if (!UI.confirm('¿Marcar el inventario como CONCILIADO/CUADRADO?')) return;
-    inv.status = 'CONCILIADO';
-    inv.conciliatedAt = new Date().toISOString();
-    inv.conciliatedBy = session.username;
-    DB.saveInventory(inv);
-    DB.addAudit({ action: 'conciliar', user: session.username, invId: id });
-    UI.toast('Inventario conciliado');
-    renderInventarios(id);
-  }
-
-  // ============ SUBIR INVENTARIO VIRTUAL ============
-  function renderUpload() {
-    shell(`
-      <div class="card">
-        <h3 style="margin-bottom:10px">Subir inventario virtual (Excel)</h3>
-        <p class="hint">Selecciona el archivo Excel generado por el sistema. Se detectarán columnas y estados automáticamente.</p>
-        <div style="margin-top:14px">
-          <input type="file" id="upload-file" accept=".xlsx,.xls,.csv">
-          <button class="btn btn-primary" onclick="AdminView.processUpload()" style="margin-left:10px">Procesar archivo</button>
-        </div>
-      </div>
-      ${pendingUpload ? previewUpload(pendingUpload) : ''}
-    `);
-  }
-
-  function processUpload() {
-    const input = document.getElementById('upload-file');
-    if (!input.files.length) return UI.toast('Selecciona un archivo Excel', 'err');
-    UI.loading(true);
-    const file = input.files[0];
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const arrayBuffer = e.target.result;
-        const res = ExcelImport.parseExcel(arrayBuffer);
-        pendingUpload = { name: file.name, res };
-        renderUpload();
-        UI.loading(false);
-        if (!res.success) {
-          UI.toast('No se pudo procesar el archivo. Verifica el formato.', 'err');
-        }
-      } catch (err) {
-        UI.loading(false);
-        UI.toast('No se pudo leer el archivo: ' + err.message, 'err');
-      }
-    };
-    reader.readAsArrayBuffer(file);
-  }
-
-  function previewUpload(pu) {
-    const res = pu.res;
-    if (!res.success) return '';
-    return `
-      <div class="card" style="margin-top:16px">
-        <h3 style="margin-bottom:10px">Vista previa: ${UI.esc(pu.name)}</h3>
-        <p class="hint">Hoja: ${UI.esc(res.sheetName)} · Estados detectados: ${res.states.map(s=>UI.esc(s.toUpperCase())).join(', ')} · Registros: ${res.lines.length}</p>
-        <div class="table-wrap"><table>
-          <thead><tr><th>#</th><th>Producto</th><th>Lote</th>${res.states.map(s=>`<th class="num">${UI.esc(s.toUpperCase())}</th>`).join('')}<th class="num">Total</th></tr></thead>
-          <tbody>${res.lines.slice(0,15).map((l,i)=>`<tr>
-            <td>${i+1}</td><td>${UI.esc(l.producto)}</td><td>${UI.esc(l.lote)}</td>
-            ${res.states.map(s=>`<td class="num">${l.estados[s]||0}</td>`).join('')}
-            <td class="num"><b>${l.total}</b></td>
-          </tr>`).join('')}</tbody>
-        </table></div>
-        ${res.lines.length>15?`<p class="hint">... y ${res.lines.length-15} más</p>`:''}
-        <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">
-          <div class="field" style="flex:1;min-width:220px"><label>Nombre del inventario (ej. Inventario Viernes 28/08/2026)</label>
-            <input id="inv-name" placeholder="Inventario Viernes ${new Date().toLocaleDateString('es-CO')}"></div>
-        </div>
-        <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
-          <button class="btn btn-success" onclick="AdminView.createInventory()">Crear inventario (BORRADOR)</button>
-        </div>
-      </div>`;
-  }
-
-  async function createInventory() {
-    const pu = pendingUpload;
-    if (!pu) return;
-    const res = pu.res;
-    const name = (document.getElementById('inv-name')?.value || '').trim() || ('Inventario ' + new Date().toLocaleDateString('es-CO'));
-    UI.loading(true);
+  async loadUsers() {
+    const container = document.getElementById('admin-view-users');
+    container.innerHTML = '<div class="loading">Cargando usuarios...</div>';
     try {
-      // cifrar el inventario virtual completo (solo admin puede descifrar)
-      const salt = 'v' + Date.now().toString(36);
-      const ref = 'v_' + Date.now().toString(36);
-      const cipher = await DB.encryptAES(JSON.stringify(res.lines), ADMIN_KEY, salt);
-      DB.saveVirtualCipher(ref, cipher);
-
-      const id = 'INV-' + Date.now().toString(36).toUpperCase().slice(0,6);
-      const numProductos = new Set(res.lines.map(l => l.producto)).size;
-      const inv = {
-        id, name,
-        virtualSalt: salt,
-        virtualRef: ref,
-        productos: numProductos,
-        lotes: res.lines.length,
-        estados: res.states,
-        virtualDate: new Date().toISOString(),
-        status: 'BORRADOR',
-        createdAt: new Date().toISOString(),
-        createdBy: session.username,
-        tasks: [],
-        assignees: [],
-        fisicos: {},
-        historial: []
-      };
-      virtualCache.set(id, res.lines);
-      inv.tasks = res.lines.map((l, i) => ({
-        id: 't' + i + '_' + Date.now().toString(36),
-        producto: l.producto, lote: l.lote, estados: res.states
-      }));
-      DB.saveInventory(inv);
-      pendingUpload = null;
-      UI.loading(false);
-      UI.toast('Inventario virtual creado (BORRADOR)');
-      nav('inventarios');
+      const users = await Auth.getAllUsers();
+      container.innerHTML = `
+        <div class="view-header">
+          <h2>Gestión de Usuarios</h2>
+          <button class="btn btn-primary" onclick="AdminView.showCreateUser()">+ Crear Usuario</button>
+        </div>
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead>
+              <tr><th>UID</th><th>Email</th><th>Rol</th><th>Acciones</th></tr>
+            </thead>
+            <tbody>
+              ${users.map(u => `
+                <tr>
+                  <td>${u.uid.substring(0, 12)}...</td>
+                  <td>${u.email || '-'}</td>
+                  <td>${UI.statusBadge(u.role || 'SIN_ROL')}</td>
+                  <td>
+                    <button class="btn btn-sm btn-outline" onclick="AdminView.changeRole('${u.uid}', '${u.role || ''}')">Cambiar Rol</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
     } catch (err) {
-      UI.loading(false);
-      UI.toast('Error: ' + err.message, 'err');
+      container.innerHTML = `<div class="error-state">Error: ${err.message}</div>`;
+    }
+  },
+
+  async showCreateUser() {
+    UI.showModal('Crear Usuario', `
+      <div class="form-group">
+        <label>Email</label>
+        <input type="email" id="new-user-email" class="form-control" placeholder="correo@ejemplo.com">
+      </div>
+      <div class="form-group">
+        <label>Contraseña</label>
+        <input type="password" id="new-user-password" class="form-control" placeholder="Mínimo 6 caracteres">
+      </div>
+      <div class="form-group">
+        <label>Rol</label>
+        <select id="new-user-role" class="form-control">
+          <option value="BODEGA">BODEGA</option>
+          <option value="ADMIN">ADMIN</option>
+        </select>
+      </div>
+    `, `
+      <button class="btn btn-secondary" onclick="UI.closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="AdminView.createUser()">Crear</button>
+    `);
+  },
+
+  async createUser() {
+    const email = document.getElementById('new-user-email').value.trim();
+    const password = document.getElementById('new-user-password').value;
+    const role = document.getElementById('new-user-role').value;
+
+    if (!email || !password) { UI.toast('Email y contraseña requeridos', 'error'); return; }
+    if (password.length < 6) { UI.toast('Contraseña mínima 6 caracteres', 'error'); return; }
+
+    try {
+      const result = await auth.createUserWithEmailAndPassword(email, password);
+      await DB.callFunction('setUserRole', { uid: result.user.uid, role });
+      UI.closeModal();
+      UI.toast('Usuario creado', 'success');
+      await this.loadUsers();
+    } catch (err) {
+      UI.toast('Error: ' + err.message, 'error');
+    }
+  },
+
+  async changeRole(uid, currentRole) {
+    const newRole = currentRole === 'ADMIN' ? 'BODEGA' : 'ADMIN';
+    if (!await UI.confirm(`¿Cambiar rol a ${newRole}?`)) return;
+    try {
+      await DB.callFunction('setUserRole', { uid, role: newRole });
+      UI.toast('Rol actualizado', 'success');
+      await this.loadUsers();
+    } catch (err) {
+      UI.toast('Error: ' + err.message, 'error');
     }
   }
-
-  // ============ USUARIOS ============
-  function renderUsuarios() {
-    const users = DB.listUsers();
-    shell(`
-      <div class="card">
-        <h3 style="margin-bottom:14px">Crear usuario</h3>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-          <div class="field" style="flex:1;min-width:160px"><label>Nombre</label><input id="nu-name"></div>
-          <div class="field" style="flex:1;min-width:140px"><label>Usuario</label><input id="nu-username"></div>
-          <div class="field"><label>Rol</label><select id="nu-role"><option value="bodega">BODEGA</option><option value="admin">ADMIN</option></select></div>
-          <div style="align-self:end"><button class="btn btn-primary" onclick="AdminView.createUser()">Crear</button></div>
-        </div>
-        <div id="nu-result" style="margin-top:10px"></div>
-      </div>
-      <div class="table-wrap card" style="margin-top:18px">
-        <h3 style="margin-bottom:10px">Usuarios</h3>
-        <table>
-          <thead><tr><th>Nombre</th><th>Usuario</th><th>Rol</th><th>Creado</th><th>Acciones</th></tr></thead>
-          <tbody>${users.map(u=>`<tr>
-            <td>${UI.esc(u.name)}</td><td>${UI.esc(u.username)}</td>
-            <td>${u.role==='admin'?'<span class="pill pill-purple">ADMIN</span>':'<span class="pill pill-blue">BODEGA</span>'}</td>
-            <td>${UI.fmtDate(u.createdAt)}</td>
-            <td><button class="btn btn-sm btn-outline" onclick="AdminView.resetPass('${u.id}')">Resetear contraseña</button></td>
-          </tr>`).join('')}</tbody>
-        </table>
-      </div>
-      <div class="card" style="margin-top:18px">
-        <h3 style="margin-bottom:8px">Asignar inventario a usuarios de bodega</h3>
-        ${assignForm()}
-      </div>
-    `);
-  }
-
-  function assignForm() {
-    const invs = DB.listInventories().filter(i => ['BORRADOR','EN CONTEO','RECONTEO'].includes(i.status));
-    const users = DB.listUsers().filter(u => u.role === 'bodega');
-    if (!invs.length || !users.length) return `<p class="hint">Crea primero un inventario y usuarios de bodega.</p>`;
-    return `
-      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
-        <div class="field"><label>Inventario</label><select id="assign-inv">${invs.map(i=>`<option value="${i.id}">${UI.esc(i.name)}</option>`).join('')}</select></div>
-        <div class="field"><label>Usuarios de bodega</label><select id="assign-users" multiple size="4">${users.map(u=>`<option value="${u.id}">${UI.esc(u.name)}</option>`).join('')}</select></div>
-        <button class="btn btn-success" onclick="AdminView.assignInventory()">Asignar y abrir conteo</button>
-      </div>
-      <p class="hint" style="margin-top:6px">Mantén Ctrl para seleccionar varios usuarios.</p>`;
-  }
-
-  function assignInventory() {
-    const invSel = document.getElementById('assign-inv');
-    const userSel = document.getElementById('assign-users');
-    if (!invSel || !userSel) return;
-    const invId = invSel.value;
-    const uids = Array.from(userSel.selectedOptions).map(o => o.value);
-    if (!uids.length) return UI.toast('Selecciona al menos un usuario', 'err');
-    const inv = DB.getInventory(invId);
-    uids.forEach(uid => {
-      if (!inv.assignees.includes(uid)) inv.assignees.push(uid);
-      // crear tareas del usuario (solo producto/lote/estados, SIN cantidades)
-      const tasks = DB.userTasks(uid);
-      if (!tasks[invId]) {
-        tasks[invId] = { invId, items: inv.tasks.map(t => ({
-          id: t.id, producto: t.producto, lote: t.lote, estados: t.estados,
-          conteo: null, total: 0, done: false
-        })), currentIndex: 0, startedAt: new Date().toISOString() };
-        DB.setUserTasks(uid, tasks);
-      }
-    });
-    if (inv.status === 'BORRADOR') inv.status = 'EN CONTEO';
-    inv.openedAt = new Date().toISOString();
-    DB.saveInventory(inv);
-    DB.addAudit({ action: 'abrir_inventario', user: session.username, invId, users: uids });
-    UI.toast('Inventario asignado y abierto en conteo');
-    nav('usuarios');
-  }
-
-  async function createUser() {
-    const name = document.getElementById('nu-name').value.trim();
-    const username = document.getElementById('nu-username').value.trim();
-    const role = document.getElementById('nu-role').value;
-    if (!name || !username) return UI.toast('Completa nombre y usuario', 'err');
-    try {
-      const { user, password } = await DB.createUser({ name, username, role });
-      document.getElementById('nu-result').innerHTML = `
-        <div class="card" style="background:#e8f5e9;border:1px solid #a5d6a7">
-          Usuario <b>${UI.esc(username)}</b> creado. Contraseña temporal: <b>${password}</b><br>
-          <span class="hint">Entrega esta contraseña al usuario. La cambiará al primer ingreso.</span>
-        </div>`;
-      nav('usuarios');
-      document.getElementById('nu-result').scrollIntoView();
-    } catch (err) { UI.toast(err.message, 'err'); }
-  }
-
-  async function resetPass(id) {
-    const u = DB.listUsers().find(x => x.id === id);
-    if (!u) return;
-    const newPass = String(Math.floor(100000 + Math.random() * 900000));
-    await DB.setPassword(id, newPass);
-    UI.toast(`Nueva contraseña para ${u.name}: ${newPass}`);
-  }
-
-  // ============ HISTORIAL ============
-  function renderHistorial() {
-    const audit = DB.getAudit().slice().reverse();
-    const invs = DB.listInventories();
-    shell(`
-      <div class="table-wrap card">
-        <h3 style="margin-bottom:10px">Historial de auditoría</h3>
-        <table><thead><tr><th>Fecha/Hora</th><th>Acción</th><th>Usuario</th><th>Inventario</th></tr></thead>
-        <tbody>${audit.map(a=>`<tr>
-          <td>${UI.fmtDate(a.ts)}</td><td>${UI.esc(a.action)}</td>
-          <td>${UI.esc(a.user)}</td><td>${a.invId?UI.esc(a.invId):'—'}</td>
-        </tr>`).join('') || '<tr><td colspan="4" class="hint">Sin actividad registrada.</td></tr>'}</tbody></table>
-      </div>
-      <div class="table-wrap card" style="margin-top:18px">
-        <h3 style="margin-bottom:10px">Historial de conteos por inventario</h3>
-        ${invs.map(inv => {
-          const h = (inv.historial||[]).slice().reverse();
-          return `<h4 style="margin:8px 0">${UI.esc(inv.name)} (${inv.id})</h4>
-            ${h.length?`<table><thead><tr><th>Tipo</th><th>Usuario</th><th>Fecha/Hora</th><th>Items</th></tr></thead>
-              <tbody>${h.map(x=>`<tr><td>${x.type==='reconteo'?'<span class="pill pill-orange">RECONTEO</span>':'<span class="pill pill-blue">CONTEO</span>'}</td>
-                <td>${UI.esc(x.userName)}</td><td>${UI.fmtDate(x.at)}</td><td class="num">${x.items}</td></tr>`).join('')}</tbody></table>`
-              :'<p class="hint">Sin conteos registrados.</p>'}`;
-        }).join('') || '<p class="hint">Sin inventarios.</p>'}
-      </div>
-    `);
-  }
-
-  // ============ HELPERS DE COMPARACIÓN ============
-  async function buildComparison(inv) {
-    const virtual = await getVirtualLines(inv);
-    const fisicoItems = consolidateFisico(inv);
-    const summary = Compare.compare(virtual, fisicoItems, inv.estados);
-    // resumen de cambios de estado
-    let resumenEstados = 0;
-    summary.rows.forEach(r => {
-      if (r.estado === 'CAMBIO DE ESTADO') {
-        resumenEstados += Object.keys(r.estados).reduce((a,s)=>a+Math.abs(r.estados[s].diff),0);
-      }
-    });
-    return { summary, virtual, fisicoItems, resumenEstados };
-  }
-
-  function consolidateFisico(inv) {
-    const fis = inv.fisicos || {};
-    const items = [];
-    const map = {};
-    Object.values(fis).forEach(f => {
-      (f.items||[]).forEach(it => {
-        const key = it.producto + '|' + it.lote;
-        if (!map[key]) { map[key] = { producto: it.producto, lote: it.lote, estados: {} }; items.push(map[key]); }
-        Object.keys(it.estados||{}).forEach(s => map[key].estados[s] = (map[key].estados[s]||0) + it.estados[s]);
-      });
-    });
-    // totales físicos
-    items.forEach(i => {
-      i.total = Object.values(i.estados).reduce((a,b)=>a+b,0);
-      if (!i.estados.buenos) i.estados.buenos = i.total;
-    });
-    return items;
-  }
-
-  function statusPill(s) {
-    const map = {
-      'BORRADOR': 'pill-gray', 'EN CONTEO': 'pill-blue', 'PENDIENTE DE REVISIÓN': 'pill-yellow',
-      'RECONTEO': 'pill-orange', 'FINALIZADO': 'pill-green', 'CON DIFERENCIAS': 'pill-red',
-      'CONCILIADO': 'pill-purple', 'CERRADO': 'pill-green'
-    };
-    return `<span class="pill ${map[s]||'pill-gray'}">${UI.esc(s)}</span>`;
-  }
-
-  function comparisonTabla(data, inv) {
-    const rows = data.summary.rows;
-    const estados = inv.estados;
-    if (!rows.length) return '<p class="hint">Sin datos.</p>';
-    return `<table>
-      <thead><tr><th>Producto</th><th>Lote</th><th class="num">Virtual</th><th class="num">Físico</th><th class="num">Diff</th><th>Estado</th>${
-        estados.map(s=>`<th class="num">V.${UI.esc(s.slice(0,3)).toUpperCase()}</th>`).join('')}${
-        estados.map(s=>`<th class="num">F.${UI.esc(s.slice(0,3)).toUpperCase()}</th>`).join('')}</tr></thead>
-      <tbody>${rows.map(r=>`<tr class="${r.hasDiff?'row-diff':''}">
-        <td>${UI.esc(r.producto)}</td><td>${UI.esc(r.lote)}</td>
-        <td class="num">${r.vTotal}</td><td class="num">${r.fTotal}</td>
-        <td class="num" style="color:${r.totalDiff<0?'var(--danger)':r.totalDiff>0?'var(--warn)':'inherit'}">${r.totalDiff>0?'+':''}${r.totalDiff}</td>
-        <td>${statePill(r.estado)}</td>
-        ${estados.map(s=>`<td class="num">${r.estados[s]?r.estados[s].v:0}</td>`).join('')}
-        ${estados.map(s=>`<td class="num">${r.estados[s]?r.estados[s].f:0}</td>`).join('')}
-      </tr>`).join('')}</tbody>
-    </table>`;
-  }
-
-  function statePill(s) {
-    const map = { 'CUADRADO':'pill-green','FALTANTE':'pill-red','SOBRANTE':'pill-orange','CAMBIO DE ESTADO':'pill-purple','NO ENCONTRADO':'pill-gray','NO ESPERADO':'pill-yellow','SIN DIFERENCIA':'pill-green' };
-    return `<span class="pill ${map[s]||'pill-gray'}">${UI.esc(s)}</span>`;
-  }
-
-  function resumenTabla(inv) {
-    const fis = inv.fisicos || {};
-    let pendientes = inv.assignees.filter(u => !fis[u]).length;
-    return `<p class="hint">Asignados: ${inv.assignees.length} · Han finalizado: ${Object.keys(fis).length} · Pendientes: ${pendientes}</p>`;
-  }
-
-  return { init, nav, logout, toggleMenu, renderDashboard, renderInventarios, detailInventory,
-    renderUpload, processUpload, createInventory, renderUsuarios, createUser, resetPass,
-    assignInventory, renderHistorial, reopen, conciliar, buildComparison, statusPill };
-})();
+};

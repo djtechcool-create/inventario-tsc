@@ -1,0 +1,14 @@
+{
+  "name": "inventario-tsc-functions",
+  "description": "Cloud Functions for Inventario TSC",
+  "engines": {
+    "node": "18"
+  },
+  "main": "index.js",
+  "dependencies": {
+    "firebase-admin": "^11.10.0",
+    "firebase-functions": "^4.5.0",
+    "xlsx": "^0.18.5"
+  },
+  "private": true
+}

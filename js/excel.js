@@ -1,149 +1,229 @@
-/* ============================================================
-   IMPORTADOR INTELIGENTE DE EXCEL
-   - Lee el workbook con SheetJS.
-   - Localiza la fila de encabezados de forma automática.
-   - Mapea columnas por nombre (con variantes).
-   - Detecta los estados de forma automática.
-   - Consolida por Producto + Lote.
-   - Valida el formato y documenta errores.
-   ============================================================ */
-const ExcelImport = (() => {
-  const HEADER_KEYS = ['producto', 'product', 'descripcion', 'desc'];
-  const LOT_KEYS = ['lote', 'lot', 'batch', 'codigo'];
-  const COLUMN_ALIASES = {
-    producto: ['producto', 'product', 'descripcion', 'desc', 'insumo'],
-    lote: ['lote', 'lot', 'batch'],
-    saldo: ['saldo', 'total', 'saldo total', 'cant', 'cantidad'],
-    ingresos: ['ingresos', 'entradas', 'ingreso'],
-    egresos: ['egresos', 'salidas', 'egreso'],
-    codigo: ['código', 'codigo', 'cod', 'cód'],
-    buenos: ['buenos', 'bueno', 'sanos'],
-    danados: ['dañados', 'dañado', 'dannados', 'danados', 'deteriorados'],
-    arreglados: ['arreglados', 'arreglado', 'reparados', 'reparado'],
-    reempacados: ['reempacados', 'reempacado', 'rempacados', 'reempaquetados']
-  };
+const ExcelUtil = {
+  FILE_HEADERS: ["Código", "Producto", "Lote", "Ingresos", "Egresos", "Saldo", "Buenos", "Dañados", "Arreglados", "Reempacados"],
+  STATES: ["Buenos", "Dañados", "Arreglados", "Reempacados"],
 
-  function norm(s) {
-    return String(s == null ? '' : s).toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-      .replace(/\s+/g, ' ').trim();
-  }
-
-  // Busca la fila índice que contiene los encabezados reales
-  function findHeaderRow(rows) {
-    for (let i = 0; i < rows.length; i++) {
-      const vals = rows[i].map(norm);
-      const hasProd = vals.some(v => HEADER_KEYS.some(k => v === k || v.includes(k) && !v.includes('total')));
-      const hasLot = vals.some(v => LOT_KEYS.includes(v));
-      if (hasProd && hasLot) return i;
-    }
-    return -1;
-  }
-
-  function expandHeader(v) {
-    if (v === 'saldo' || v === 'total') return ['saldo', 'total', 'cantidad'];
-    return [v];
-  }
-
-  function detectColumns(headerRow) {
-    const map = {};
-    const stateCols = [];
-    headerRow.forEach((val, idx) => {
-      const n = norm(val);
-      const counts = {};
-      if (!n) return;
-      for (const grp of ['buenos', 'danados', 'arreglados', 'reempacados']) {
-        const aliases = COLUMN_ALIASES[grp];
-        if (aliases.some(a => n === a || (n.length > 3 && a.includes(n) || n.includes(a)))) {
-          if (!(grp in counts)) counts[grp] = 0;
-          counts[grp]++;
+  parseFile(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const data = new Uint8Array(e.target.result);
+          const workbook = XLSX.read(data, { type: "array" });
+          resolve(workbook);
+        } catch (err) {
+          reject(new Error("Error al leer el archivo Excel: " + err.message));
         }
-      }
-      // Asignar mejor coincidencia
-      if ('buenos' in counts) map[idx] = 'buenos';
-      else if ('danados' in counts) map[idx] = 'danados';
-      else if ('arreglados' in counts) map[idx] = 'arreglados';
-      else if ('reempacados' in counts) map[idx] = 'reempacados';
-      else if (COLUMN_ALIASES.producto.some(a => n === a || n.includes(a))) map[idx] = 'producto';
-      else if (COLUMN_ALIASES.lote.some(a => n === a)) map[idx] = 'lote';
-      else if (COLUMN_ALIASES.saldo.some(a => n === a)) map[idx] = 'saldo';
-      else if (COLUMN_ALIASES.ingresos.some(a => n === a)) map[idx] = 'ingresos';
-      else if (COLUMN_ALIASES.egresos.some(a => n === a)) map[idx] = 'egresos';
-      else if (COLUMN_ALIASES.codigo.some(a => n === a)) map[idx] = 'codigo';
+      };
+      reader.onerror = () => reject(new Error("Error al leer el archivo."));
+      reader.readAsArrayBuffer(file);
     });
-    return map;
-  }
+  },
 
-  function toNum(v) {
-    if (v == null || v === '') return 0;
-    if (typeof v === 'number') return v;
-    const s = String(v).replace(/[^\d.\-]/g, '');
-    const n = parseFloat(s);
-    return isNaN(n) ? 0 : n;
-  }
+  analyzeWorkbook(workbook) {
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet["!ref"]) throw new Error("El archivo Excel está vacío.");
 
-  // Lee el archivo y devuelve { eerors, warnings, rows, headerRowIndex, rawHeader }
-  function parseExcel(arrayBuffer) {
-    const wb = XLSX.read(arrayBuffer, { type: 'array' });
-    const sheetName = wb.SheetNames[0];
-    const ws = wb.Sheets[sheetName];
-    const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null, raw: true });
-    const rows = raw.filter(r => r && r.some(c => c != null && c !== ''));
+    const range = XLSX.utils.decode_range(sheet["!ref"]);
+    let headerRow = -1;
+    let detectedHeaders = [];
 
-    const headerIdx = findHeaderRow(rows);
-    const errors = [], warnings = [];
-    if (headerIdx < 0) {
-      errors.push('No se encontró una fila con los encabezados "Producto" y "Lote". Verifica el archivo.');
-      return { success: false, errors, warnings, sheetName };
-    }
-    const rawHeader = rows[headerIdx];
-    const colMap = detectColumns(rawHeader);
-    const mapped = Object.values(colMap);
-    if (!mapped.includes('producto') || !mapped.includes('lote')) {
-      errors.push('No se encontraron las columnas de "Producto" y/o "Lote".');
-      return { success: false, errors, warnings, sheetName, headerRow: rawHeader };
-    }
-    // estados detectados
-    const states = [];
-    for (const s of ['buenos', 'danados', 'arreglados', 'reempacados'])
-      if (Object.values(colMap).includes(s)) states.push(s);
-
-    // Consolidar por producto+lote
-    const consolidated = {};
-    const lines = [];
-    // mapa inverso: nombre de campo -> indice de columna
-    const idxOf = {};
-    Object.entries(colMap).forEach(([col, field]) => { idxOf[field] = Number(col); });
-    const col = (field) => idxOf[field] != null ? idxOf[field] : null;
-
-    for (let i = headerIdx + 1; i < rows.length; i++) {
-      const r = rows[i];
-      const pi = col('producto'), li = col('lote');
-      const producto = String(pi != null && r[pi] != null ? r[pi] : '').trim();
-      const lote = String(li != null && r[li] != null ? r[li] : '').trim();
-      // descartar totales
-      if (!producto || /^total/i.test(producto) || /^total/i.test(lote)) continue;
-      const key = (producto + '||' + lote);
-      if (!consolidated[key]) {
-        consolidated[key] = { producto, lote, estados: {} };
-        for (const s of states) consolidated[key].estados[s] = 0;
-        lines.push(consolidated[key]);
+    for (let r = range.s.r; r <= Math.min(range.s.r + 10, range.e.r); r++) {
+      const rowVals = [];
+      for (let c = range.s.c; c <= range.e.c; c++) {
+        const cell = sheet[XLSX.utils.encode_cell({ r, c })];
+        rowVals.push(cell ? String(cell.v).trim() : "");
       }
-      for (const s of states) {
-        const si = col(s);
-        if (si != null && r[si] != null) consolidated[key].estados[s] += Math.round(toNum(r[si]));
+      const matchCount = this.FILE_HEADERS.filter((h, i) => rowVals[i] === h).length;
+      if (matchCount >= 7) {
+        headerRow = r;
+        detectedHeaders = rowVals;
+        break;
       }
     }
-    // totals por producto
-    lines.forEach(l => l.total = Object.values(l.estados).reduce((a, b) => a + b, 0));
 
-    if (lines.length === 0) {
-      errors.push('No se encontraron productos/lotes para importar.');
-      return { success: false, errors, warnings, sheetName, headerRow: rawHeader };
+    if (headerRow === -1) {
+      throw new Error("No se encontraron los encabezados esperados en el archivo.");
     }
-    return { success: true, errors, warnings, sheetName, headerRow: rawHeader,
-      headerMap: colMap, states, lines };
-  }
 
-  return { parseExcel, COLUMN_ALIASES, norm };
-})();
+    const items = [];
+    const errors = [];
+    const seenKeys = new Set();
+
+    for (let r = headerRow + 1; r <= range.e.r; r++) {
+      const codigo = this.getCellValue(sheet, r, 0);
+      const producto = this.getCellValue(sheet, r, 1);
+      const lote = this.getCellValue(sheet, r, 2);
+
+      if (!codigo || !producto || !lote) continue;
+      if (codigo.toUpperCase() === "TOTALES" || codigo.toUpperCase().includes("TOTAL")) continue;
+
+      const ingresos = this.getNumericValue(sheet, r, 3);
+      const egresos = this.getNumericValue(sheet, r, 4);
+      const saldo = this.getNumericValue(sheet, r, 5);
+      const buenos = this.getNumericValue(sheet, r, 6);
+      const danados = this.getNumericValue(sheet, r, 7);
+      const arreglados = this.getNumericValue(sheet, r, 8);
+      const reempacados = this.getNumericValue(sheet, r, 9);
+
+      const key = `${codigo}|${producto}|${lote}`;
+      if (seenKeys.has(key)) {
+        errors.push({ row: r + 1, type: "DUPLICATE", message: `Duplicado: ${key}` });
+        continue;
+      }
+      seenKeys.add(key);
+
+      const stateTotal = buenos + danados + arreglados + reempacados;
+      if (stateTotal !== saldo) {
+        errors.push({
+          row: r + 1, type: "STATE_MISMATCH",
+          message: `Suma de estados (${stateTotal}) ≠ Saldo (${saldo})`
+        });
+      }
+
+      items.push({
+        codigo, producto, lote, ingresos, egresos, saldo,
+        buenos, danados, arreglados, reempacados
+      });
+    }
+
+    return {
+      sheetName,
+      headers: detectedHeaders,
+      headerRow,
+      items,
+      errors,
+      totalRows: items.length,
+      states: this.STATES.filter(s => items.some(item => item[s.toLowerCase()] > 0))
+    };
+  },
+
+  getItemKey(item) {
+    return `${item.codigo}|${item.producto}|${item.lote}`;
+  },
+
+  getCellValue(sheet, row, col) {
+    const cell = sheet[XLSX.utils.encode_cell({ r: row, c: col })];
+    return cell ? String(cell.v).trim() : "";
+  },
+
+  getNumericValue(sheet, row, col) {
+    const cell = sheet[XLSX.utils.encode_cell({ r: row, c: col })];
+    if (!cell || cell.v === undefined || cell.v === null || cell.v === "") return 0;
+    const num = Number(cell.v);
+    return isNaN(num) ? 0 : num;
+  },
+
+  async fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = reader.result.split(",")[1];
+        resolve(base64);
+      };
+      reader.onerror = () => reject(new Error("Error al leer archivo."));
+      reader.readAsDataURL(file);
+    });
+  },
+
+  exportToExcel(data, filename, sheetName = "Datos") {
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    XLSX.writeFile(wb, filename);
+  },
+
+  exportComparisonToExcel(comparison, virtualItems, physicalCounts) {
+    const rows = comparison.results.map(r => ({
+      "Código": r.codigo,
+      "Producto": r.producto,
+      "Lote": r.lote,
+      "Virtual Buenos": r.virtual.buenos,
+      "Virtual Dañados": r.virtual.danados,
+      "Virtual Arreglados": r.virtual.arreglados,
+      "Virtual Reempacados": r.virtual.reempacados,
+      "Virtual Total": r.virtual.total,
+      "Físico Buenos": r.physical.buenos,
+      "Físico Dañados": r.physical.danados,
+      "Físico Arreglados": r.physical.arreglados,
+      "Físico Reempacados": r.physical.reempacados,
+      "Físico Total": r.physical.total,
+      "Diferencia": r.diferencia,
+      "Tipo": r.tipo === "SIN_DIFERENCIA" ? "Sin diferencia" :
+              r.tipo === "FALTANTE" ? "Faltante" :
+              r.tipo === "SOBRANTE" ? "Sobrante" : "Cambio de estado",
+      "Cambio Estado": r.cambioEstado ? "Sí" : "No"
+    }));
+
+    const summaryRows = [
+      {}, { "Código": "RESUMEN" },
+      { "Código": "Total registros", "Producto": comparison.summary.total },
+      { "Código": "Sin diferencia", "Producto": comparison.summary.sinDiferencia },
+      { "Código": "Faltantes", "Producto": comparison.summary.faltantes },
+      { "Código": "Sobrantes", "Producto": comparison.summary.sobrantes },
+      { "Código": "Cambios de estado", "Producto": comparison.summary.cambioEstado }
+    ];
+
+    const allRows = [...rows, ...summaryRows];
+    this.exportToExcel(allRows, `Comparacion_${new Date().toISOString().slice(0, 10)}.xlsx`, "Comparación");
+  },
+
+  exportReconciliationToExcel(reconciliation, comparison) {
+    const rows = comparison.results.map(r => ({
+      "Código": r.codigo,
+      "Producto": r.producto,
+      "Lote": r.lote,
+      "Virtual Total": r.virtual.total,
+      "Físico Total": r.physical.total,
+      "Diferencia": r.diferencia,
+      "Tipo": r.tipo,
+      "Ajuste Buenos": reconciliation.adjustments[r.key]?.buenos ?? "",
+      "Ajuste Dañados": reconciliation.adjustments[r.key]?.danados ?? "",
+      "Ajuste Arreglados": reconciliation.adjustments[r.key]?.arreglados ?? "",
+      "Ajuste Reempacados": reconciliation.adjustments[r.key]?.reempacados ?? ""
+    }));
+
+    this.exportToExcel(rows, `Conciliacion_${new Date().toISOString().slice(0, 10)}.xlsx`, "Conciliación");
+  },
+
+  exportPhysicalCountsToExcel(counts) {
+    const rows = [];
+    counts.forEach(count => {
+      if (count.detail && Array.isArray(count.detail)) {
+        count.detail.forEach(d => {
+          rows.push({
+            "Fecha": count.createdAt?.toDate?.().toLocaleDateString('es-CO') || '',
+            "Usuario": count.userId,
+            "Código": d.codigo,
+            "Producto": d.producto,
+            "Lote": d.lote,
+            "Buenos": d.buenos,
+            "Dañados": d.danados,
+            "Arreglados": d.arreglados,
+            "Reempacados": d.reempacados,
+            "Total": (d.buenos || 0) + (d.danados || 0) + (d.arreglados || 0) + (d.reempacados || 0),
+            "Estado": count.status,
+            "Versión": count.version
+          });
+        });
+      }
+    });
+    this.exportToExcel(rows, `Conteos_Fisicos_${new Date().toISOString().slice(0, 10)}.xlsx`, "Conteos Físicos");
+  },
+
+  exportVirtualToExcel(virtualItems) {
+    const rows = virtualItems.map(v => ({
+      "Código": v.codigo,
+      "Producto": v.producto,
+      "Lote": v.lote,
+      "Ingresos": v.ingresos,
+      "Egresos": v.egresos,
+      "Saldo": v.saldo,
+      "Buenos": v.buenos,
+      "Dañados": v.danados,
+      "Arreglados": v.arreglados,
+      "Reempacados": v.reempacados
+    }));
+    this.exportToExcel(rows, `Inventario_Virtual_${new Date().toISOString().slice(0, 10)}.xlsx`, "Virtual");
+  }
+};
